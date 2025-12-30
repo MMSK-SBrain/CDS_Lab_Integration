@@ -1,0 +1,8 @@
+[submodule "cds"]
+	path = cds
+	url = https://github.com/MMSK-SBrain/Lecture_Delivery.git
+	branch = integration
+[submodule "labs/ev-lab"]
+	path = labs/ev-lab
+	url = https://github.com/MMSK-SBrain/Integrated_EV_Lab.git
+	branch = integration

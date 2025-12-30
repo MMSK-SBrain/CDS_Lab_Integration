@@ -1,0 +1,299 @@
+version: '3.8'
+
+# CDS-EV Lab Integration Stack
+# This Docker Compose file runs the complete integrated system
+# with different ports from demo environments
+
+networks:
+  cds-lab-network:
+    driver: bridge
+
+volumes:
+  cds-db-data:
+    driver: local
+  cds-redis-data:
+    driver: local
+  ev-lab-db-data:
+    driver: local
+  ev-lab-redis-data:
+    driver: local
+
+services:
+  # ============================================
+  # CDS Services
+  # ============================================
+
+  cds-db:
+    image: postgres:15-alpine
+    container_name: cds-postgres-integration
+    environment:
+      POSTGRES_DB: ${CDS_DB_NAME:-cds_integration}
+      POSTGRES_USER: ${CDS_DB_USER:-cds_user}
+      POSTGRES_PASSWORD: ${CDS_DB_PASSWORD}
+    ports:
+      - "5433:5432"  # Different from demo (5432)
+    networks:
+      - cds-lab-network
+    volumes:
+      - cds-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CDS_DB_USER:-cds_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cds-redis:
+    image: redis:7-alpine
+    container_name: cds-redis-integration
+    command: redis-server --appendonly yes
+    ports:
+      - "6380:6379"  # Different from demo (6379)
+    networks:
+      - cds-lab-network
+    volumes:
+      - cds-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cds-backend:
+    build:
+      context: ../cds/backend
+      dockerfile: Dockerfile
+    container_name: cds-backend-integration
+    environment:
+      NODE_ENV: ${NODE_ENV:-integration}
+      PORT: 3001
+      DATABASE_URL: postgresql://${CDS_DB_USER:-cds_user}:${CDS_DB_PASSWORD}@cds-db:5432/${CDS_DB_NAME:-cds_integration}
+      REDIS_URL: redis://cds-redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      CORS_ORIGINS: http://localhost:3010,http://cds-frontend:3000
+
+      # EV Lab Integration
+      EV_LAB_BASE_URL: ${EV_LAB_BASE_URL:-http://localhost:3020}
+      EV_LAB_API_URL: ${EV_LAB_API_URL:-http://ev-lab-api-gateway:8000}
+      EV_LAB_API_KEY: ${EV_LAB_API_KEY}
+
+    ports:
+      - "3011:3001"  # Different from demo (3001 -> 3011)
+    networks:
+      - cds-lab-network
+    depends_on:
+      cds-db:
+        condition: service_healthy
+      cds-redis:
+        condition: service_healthy
+    volumes:
+      - ../cds/backend:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+  cds-frontend:
+    build:
+      context: ../cds/frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: cds-frontend-integration
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3011
+      NEXT_PUBLIC_ENV: integration
+      NODE_ENV: development
+    ports:
+      - "3010:3000"  # Different from demo (3000 -> 3010)
+    networks:
+      - cds-lab-network
+    depends_on:
+      - cds-backend
+    volumes:
+      - ../cds/frontend:/app
+      - /app/node_modules
+      - /app/.next
+    restart: unless-stopped
+
+  # ============================================
+  # EV Lab Services
+  # ============================================
+
+  ev-lab-db:
+    image: postgres:15-alpine
+    container_name: ev-lab-postgres-integration
+    environment:
+      POSTGRES_DB: ${EV_LAB_DB_NAME:-ev_lab_integration}
+      POSTGRES_USER: ${EV_LAB_DB_USER:-ev_lab_user}
+      POSTGRES_PASSWORD: ${EV_LAB_DB_PASSWORD}
+    ports:
+      - "5434:5432"  # Different from demo (5432 -> 5434)
+    networks:
+      - cds-lab-network
+    volumes:
+      - ev-lab-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EV_LAB_DB_USER:-ev_lab_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ev-lab-redis:
+    image: redis:7-alpine
+    container_name: ev-lab-redis-integration
+    command: redis-server --appendonly yes
+    ports:
+      - "6381:6379"  # Different from demo (6379 -> 6381)
+    networks:
+      - cds-lab-network
+    volumes:
+      - ev-lab-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pybamm:
+    build:
+      context: ../labs/ev-lab/docker/pybamm
+      dockerfile: Dockerfile
+    container_name: pybamm-integration
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8011:8001"  # Different from demo (8001 -> 8011)
+    networks:
+      - cds-lab-network
+    volumes:
+      - ../labs/ev-lab/docker/pybamm:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ev-sim:
+    build:
+      context: ../labs/ev-lab/docker/ev_sim
+      dockerfile: Dockerfile
+    container_name: ev-sim-integration
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8012:8002"  # Different from demo (8002 -> 8012)
+    networks:
+      - cds-lab-network
+    volumes:
+      - ../labs/ev-lab/docker/ev_sim:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  liionpack:
+    build:
+      context: ../labs/ev-lab/docker/liionpack
+      dockerfile: Dockerfile
+    container_name: liionpack-integration
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8013:8003"  # Different from demo (8003 -> 8013)
+    networks:
+      - cds-lab-network
+    volumes:
+      - ../labs/ev-lab/docker/liionpack:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ev-lab-api-gateway:
+    build:
+      context: ../labs/ev-lab/docker/api-gateway
+      dockerfile: Dockerfile
+    container_name: ev-lab-api-integration
+    environment:
+      ENVIRONMENT: integration
+
+      # Database
+      DATABASE_URL: postgresql://${EV_LAB_DB_USER:-ev_lab_user}:${EV_LAB_DB_PASSWORD}@ev-lab-db:5432/${EV_LAB_DB_NAME:-ev_lab_integration}
+
+      # Redis
+      REDIS_HOST: ev-lab-redis
+      REDIS_PORT: 6379
+
+      # Services
+      PYBAMM_HOST: pybamm
+      PYBAMM_PORT: 8001
+      EVSIM_HOST: ev-sim
+      EVSIM_PORT: 8002
+      LIIONPACK_HOST: liionpack
+      LIIONPACK_PORT: 8003
+
+      # JWT
+      JWT_SECRET_KEY: ${JWT_SECRET}
+
+      # CDS Integration
+      CDS_BASE_URL: ${CDS_BASE_URL:-http://cds-backend:3001}
+      CDS_API_KEY: ${CDS_API_KEY}
+      CDS_WEBHOOK_URL: ${CDS_WEBHOOK_URL:-http://cds-backend:3001/api/integrations/lab-results}
+      ENABLE_CDS_INTEGRATION: ${ENABLE_CDS_INTEGRATION:-true}
+
+      # CORS
+      CORS_ORIGINS: http://localhost:3020,http://ev-lab-frontend:3000
+
+    ports:
+      - "8010:8000"  # Different from demo (8000 -> 8010)
+    networks:
+      - cds-lab-network
+    depends_on:
+      ev-lab-db:
+        condition: service_healthy
+      ev-lab-redis:
+        condition: service_healthy
+      pybamm:
+        condition: service_healthy
+      ev-sim:
+        condition: service_healthy
+      liionpack:
+        condition: service_healthy
+    volumes:
+      - ../labs/ev-lab/docker/api-gateway:/app
+      - ../labs/ev-lab/docker/config:/app/config
+      - ../labs/ev-lab/sdk:/app/sdk
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ev-lab-frontend:
+    build:
+      context: ../labs/ev-lab/frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: ev-lab-frontend-integration
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8010
+      NEXT_PUBLIC_ENV: integration
+      NODE_ENV: development
+    ports:
+      - "3020:3000"  # Different from demo (3000 -> 3020)
+    networks:
+      - cds-lab-network
+    depends_on:
+      - ev-lab-api-gateway
+    volumes:
+      - ../labs/ev-lab/frontend:/app
+      - /app/node_modules
+      - /app/.next
+    restart: unless-stopped

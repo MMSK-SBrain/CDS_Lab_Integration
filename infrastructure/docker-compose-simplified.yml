@@ -1,0 +1,220 @@
+version: '3.8'
+
+# CDS-EV Lab Integration Stack (Simplified)
+# Backend services only - frontends run locally with npm
+
+networks:
+  cds-lab-network:
+    driver: bridge
+
+volumes:
+  cds-db-data:
+    driver: local
+  cds-redis-data:
+    driver: local
+  ev-lab-db-data:
+    driver: local
+  ev-lab-redis-data:
+    driver: local
+
+services:
+  # ============================================
+  # CDS Backend Services
+  # ============================================
+
+  cds-db:
+    image: postgres:15-alpine
+    container_name: cds-postgres-integration
+    environment:
+      POSTGRES_DB: ${CDS_DB_NAME:-cds_integration}
+      POSTGRES_USER: ${CDS_DB_USER:-cds_user}
+      POSTGRES_PASSWORD: ${CDS_DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    networks:
+      - cds-lab-network
+    volumes:
+      - cds-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CDS_DB_USER:-cds_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  cds-redis:
+    image: redis:7-alpine
+    container_name: cds-redis-integration
+    command: redis-server --appendonly yes
+    ports:
+      - "6380:6379"
+    networks:
+      - cds-lab-network
+    volumes:
+      - cds-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # EV Lab Backend Services
+  # ============================================
+
+  ev-lab-db:
+    image: postgres:15-alpine
+    container_name: ev-lab-postgres-integration
+    environment:
+      POSTGRES_DB: ${EV_LAB_DB_NAME:-ev_lab_integration}
+      POSTGRES_USER: ${EV_LAB_DB_USER:-ev_lab_user}
+      POSTGRES_PASSWORD: ${EV_LAB_DB_PASSWORD}
+    ports:
+      - "5434:5432"
+    networks:
+      - cds-lab-network
+    volumes:
+      - ev-lab-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${EV_LAB_DB_USER:-ev_lab_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ev-lab-redis:
+    image: redis:7-alpine
+    container_name: ev-lab-redis-integration
+    command: redis-server --appendonly yes
+    ports:
+      - "6381:6379"
+    networks:
+      - cds-lab-network
+    volumes:
+      - ev-lab-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  pybamm:
+    build:
+      context: ../labs/ev-lab/docker/pybamm
+      dockerfile: Dockerfile
+    container_name: pybamm-integration
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8011:8001"
+    networks:
+      - cds-lab-network
+    volumes:
+      - ../labs/ev-lab/docker/pybamm:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ev-sim:
+    build:
+      context: ../labs/ev-lab/docker/ev_sim
+      dockerfile: Dockerfile
+    container_name: ev-sim-integration
+    environment:
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app:/app/repo
+      MPLBACKEND: Agg
+    ports:
+      - "8012:8002"
+    networks:
+      - cds-lab-network
+    volumes:
+      - ../labs/ev-lab/docker/ev_sim:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  liionpack:
+    build:
+      context: ../labs/ev-lab/docker/liionpack
+      dockerfile: Dockerfile
+    container_name: liionpack-integration
+    environment:
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "8013:8003"
+    networks:
+      - cds-lab-network
+    volumes:
+      - ../labs/ev-lab/docker/liionpack:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ev-lab-api-gateway:
+    build:
+      context: ../labs/ev-lab/docker/api-gateway
+      dockerfile: Dockerfile
+    container_name: ev-lab-api-integration
+    environment:
+      ENVIRONMENT: integration
+      DATABASE_URL: postgresql://${EV_LAB_DB_USER:-ev_lab_user}:${EV_LAB_DB_PASSWORD}@ev-lab-db:5432/${EV_LAB_DB_NAME:-ev_lab_integration}
+      REDIS_HOST: ev-lab-redis
+      REDIS_PORT: 6379
+      PYBAMM_HOST: pybamm
+      PYBAMM_PORT: 8001
+      EVSIM_HOST: ev-sim
+      EVSIM_PORT: 8002
+      LIIONPACK_HOST: liionpack
+      LIIONPACK_PORT: 8003
+      JWT_SECRET_KEY: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET}
+      CDS_BASE_URL: http://localhost:3011
+      CDS_API_KEY: ${CDS_API_KEY}
+      CDS_WEBHOOK_URL: http://localhost:3011/api/integrations/lab-results
+      ENABLE_CDS_INTEGRATION: ${ENABLE_CDS_INTEGRATION:-true}
+      CORS_ORIGINS: http://localhost:3020,http://localhost:3010
+    ports:
+      - "8010:8000"
+    networks:
+      - cds-lab-network
+    depends_on:
+      ev-lab-db:
+        condition: service_healthy
+      ev-lab-redis:
+        condition: service_healthy
+      pybamm:
+        condition: service_healthy
+      ev-sim:
+        condition: service_healthy
+      liionpack:
+        condition: service_healthy
+    volumes:
+      - ../labs/ev-lab/docker/api-gateway:/app
+      - ../labs/ev-lab/docker/config:/app/config
+      - ../labs/ev-lab/sdk:/app/sdk
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# NOTE: Frontends run locally with npm
+# CDS Frontend: cd cds/frontend && npm run dev (http://localhost:3010)
+# EV Lab Frontend: cd labs/ev-lab/frontend && npm run dev (http://localhost:3020)
